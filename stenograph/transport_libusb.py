@@ -1,9 +1,13 @@
 from usb import core, util
-from pyusb_libusb1_backend import get_pyusb_backend
 
+from stenograph.libusb_backend import resolve_pyusb_backend
 from stenograph.transport import MachineTransport
 from stenograph.packet import MAX_READ, StenoPacket
-from stenograph.exception import ProtocolViolationException, ConnectionError
+from stenograph.exception import (
+    ConnectionError,
+    MissingUsbBackendError,
+    ProtocolViolationException,
+)
 
 
 VENDOR_ID = 0x112b
@@ -17,13 +21,21 @@ class LibusbTransport(MachineTransport):
         self._endpoint_in = None
         self._endpoint_out = None
         self._connected = False
-        self._backend = get_pyusb_backend()
+        self._backend = resolve_pyusb_backend()
 
     def connect(self):
         """Attempt to and return connection"""
         # Disconnect device if it's already connected.
         if self._connected:
             self.disconnect()
+
+        if self._backend is None:
+            raise MissingUsbBackendError(
+                "No USB backend (libusb-1.0) available. "
+                "On macOS, install libusb (for example: brew install libusb). "
+                "If it is already installed, ensure Plover can load it — "
+                "see https://github.com/opensteno/plover/issues/1841"
+            )
 
         # Find the device by the vendor ID.
         usb_device = core.find(backend=self._backend, idVendor=VENDOR_ID)
