@@ -37,3 +37,16 @@ PY="/Applications/Plover.app/Contents/Frameworks/Python.framework/Versions/Curre
 
 See [opensteno/plover#1841](https://github.com/opensteno/plover/issues/1841) for
 background on **`No backend available`** on macOS.
+
+## Releasing
+
+Cut a release with `scripts/release.sh <version>`, e.g.:
+
+```bash
+./scripts/release.sh v2.1.1
+```
+
+The version must start with `v`. The script creates an annotated git tag,
+pushes it, and creates a GitHub release with auto-generated notes, which
+triggers the `publish` workflow to upload the sdist to PyPI via trusted
+publishing.
