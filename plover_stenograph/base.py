@@ -30,6 +30,9 @@ class StenographMachine(ThreadedStenotypeBase):
         self._initializing()
         try:
             self._transport.connect()
+        except MissingUsbBackendError as e:
+            log.error("%s", e)
+            self._error()
         except ConnectionError as e:
             log.error("Stenograph writer is not connected: %s" % e)
             self._error()

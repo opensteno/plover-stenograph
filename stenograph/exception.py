@@ -2,6 +2,12 @@ class ConnectionError(Exception):
     """We could not connect to the writer."""
     pass
 
+
+class MissingUsbBackendError(Exception):
+    """PyUSB could not load libusb (host dependency missing or not discoverable)."""
+    pass
+
+
 class ProtocolViolationException(Exception):
     """The writer did something unexpected"""
     pass
