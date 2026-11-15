@@ -32,9 +32,11 @@ class LibusbTransport(MachineTransport):
         if self._backend is None:
             raise MissingUsbBackendError(
                 "No USB backend (libusb-1.0) available. "
-                "On macOS, install libusb (for example: brew install libusb). "
-                "If it is already installed, ensure Plover can load it — "
-                "see https://github.com/opensteno/plover/issues/1841"
+                "Check the log for loading errors. On macOS, force-reinstall "
+                "libusb-package for Plover's architecture using the instructions at "
+                "https://github.com/opensteno/plover-stenograph"
+                "#switching-between-apple-silicon-and-rosetta "
+                "or install system libusb as a fallback (brew install libusb)."
             )
 
         # Find the device by the vendor ID.
