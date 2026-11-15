@@ -222,12 +222,13 @@ class WindowsUsbTransport(MachineTransport):
         if bytes_read.value < StenoPacket.HEADER_SIZE:
             raise ConnectionError('ReadFile: short read, %u < %u',
                       bytes_read.value, StenoPacket.HEADER_SIZE)
-        writer_packet = StenoPacket.unpack(self._read_buffer)
+        writer_packet = StenoPacket.unpack(self._read_buffer.raw[:bytes_read.value])
         return writer_packet
 
     def disconnect(self):
+        handle = self._usb_device
         self._usb_device = INVALID_HANDLE_VALUE
-        if not CloseHandle(self._usb_device):
+        if handle != INVALID_HANDLE_VALUE and not CloseHandle(handle):
             raise ConnectionError('CloseHandle: %s' % ctypes.WinError())
 
     def connect(self):
@@ -241,10 +242,7 @@ class WindowsUsbTransport(MachineTransport):
         if self._usb_device == INVALID_HANDLE_VALUE:
             raise ConnectionError("USB device is not open")
         written = self._usb_write_packet(request)
-        if written < StenoPacket.HEADER_SIZE:
+        if written != StenoPacket.HEADER_SIZE + request.data_length:
             raise ConnectionError("Could not write to USB device")
         writer_packet = self._usb_read_packet()
-        if (writer_packet.sequence_number == request.sequence_number and
-            writer_packet.packet_type == request.packet_type):
-            return self.handle_response(writer_packet)
-        raise ProtocolViolationException()
+        return self.handle_response(writer_packet, request)

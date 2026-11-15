@@ -1,12 +1,13 @@
-from usb import core, util
+import errno
 
+from usb import control, core, util
+
+from stenograph.response import read_response
 from stenograph.libusb_backend import resolve_pyusb_backend
 from stenograph.transport import MachineTransport
-from stenograph.packet import MAX_READ, StenoPacket
 from stenograph.exception import (
     ConnectionError,
     MissingUsbBackendError,
-    ProtocolViolationException,
 )
 
 
@@ -21,6 +22,7 @@ class LibusbTransport(MachineTransport):
         self._endpoint_in = None
         self._endpoint_out = None
         self._connected = False
+        self._pending = bytearray()
         self._backend = resolve_pyusb_backend()
 
     def connect(self):
@@ -42,35 +44,37 @@ class LibusbTransport(MachineTransport):
         if not usb_device:  # Device not found
             raise ConnectionError("USB device not connected")
 
-        # Copy the default configuration.
-        usb_device.set_configuration()
-        config = usb_device.get_active_configuration()
-        interface = config[(0, 0)]
-
-        # Get the write endpoint.
-        endpoint_out = util.find_descriptor(
-            interface,
-            custom_match=lambda e:
-                util.endpoint_direction(e.bEndpointAddress) ==
-                util.ENDPOINT_OUT
-        )
-        assert endpoint_out is not None, 'cannot find write endpoint'
-
-        # Get the read endpoint.
-        endpoint_in = util.find_descriptor(
-            interface,
-            custom_match=lambda e:
-                util.endpoint_direction(e.bEndpointAddress) ==
-                util.ENDPOINT_IN
-        )
-        assert endpoint_in is not None, 'cannot find read endpoint'
+        try:
+            # SET_CONFIGURATION resets endpoint state even when unchanged.
+            # Some writers enumerate unconfigured and still need activation.
+            if control.get_configuration(usb_device) == 0:
+                usb_device.set_configuration()
+            config = usb_device.get_active_configuration()
+            interface = config[(0, 0)]
+            endpoints = {
+                util.endpoint_direction(endpoint.bEndpointAddress): endpoint
+                for endpoint in interface
+                if util.endpoint_type(endpoint.bmAttributes) == util.ENDPOINT_TYPE_BULK
+            }
+            endpoint_out = endpoints.get(util.ENDPOINT_OUT)
+            endpoint_in = endpoints.get(util.ENDPOINT_IN)
+            if endpoint_out is None or endpoint_in is None:
+                raise ConnectionError("Writer interface has no bulk IN/OUT pair")
+            if not 0 < endpoint_in.wMaxPacketSize <= 1024:
+                raise ConnectionError("Invalid writer USB packet size")
+            util.claim_interface(usb_device, interface.bInterfaceNumber)
+        except Exception:
+            util.dispose_resources(usb_device)
+            raise
 
         self._usb_device = usb_device
         self._endpoint_in = endpoint_in
         self._endpoint_out = endpoint_out
+        self._pending.clear()
         self._connected = True
 
     def disconnect(self):
+        self._pending.clear()
         self._connected = False
         if self._usb_device:
             util.dispose_resources(self._usb_device)
@@ -80,17 +84,28 @@ class LibusbTransport(MachineTransport):
 
     def send_receive(self, request):
         assert self._connected, 'cannot read from machine if not connected'
+        endpoint = self._endpoint_out
         try:
-            self._endpoint_out.write(request.pack())
-            response = self._endpoint_in.read(
-                MAX_READ + StenoPacket.HEADER_SIZE, 3000)
-        except Exception as e:
-            raise ConnectionError(e)
-        else:
-            if response and len(response) >= StenoPacket.HEADER_SIZE:
-                writer_packet = StenoPacket.unpack(response)
-                if (writer_packet.sequence_number == request.sequence_number and
-                    writer_packet.packet_type == request.packet_type):
-                    return self.handle_response(writer_packet)
-                raise ProtocolViolationException()
-            raise ConnectionError("No response from writer")
+            data = request.pack()
+            if self._endpoint_out.write(data, 3000) != len(data):
+                raise ConnectionError("Incomplete request sent to writer")
+            endpoint = self._endpoint_in
+            response = read_response(
+                request,
+                lambda size, timeout: self._endpoint_in.read(size, max(1, int(timeout * 1000))),
+                self._pending,
+                self._endpoint_in.wMaxPacketSize,
+            )
+        except core.USBError as error:
+            if error.errno == errno.EPIPE:
+                # Recover an explicitly halted endpoint, without resetting the
+                # device or clearing healthy endpoints on every reconnect.
+                try:
+                    self._usb_device.clear_halt(endpoint.bEndpointAddress)
+                except core.USBError as recovery_error:
+                    raise ConnectionError(
+                        "USB exchange failed: %s; clearing endpoint halt failed: %s"
+                        % (error, recovery_error)
+                    ) from recovery_error
+            raise ConnectionError("USB exchange failed: %s" % error) from error
+        return self.handle_response(response, request)

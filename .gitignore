@@ -3,6 +3,7 @@
 __pycache__
 /build
 /dist
+/.venv
 
 *.sublime-*
 /.idea
