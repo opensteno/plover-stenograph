@@ -11,9 +11,22 @@ plugins to reuse code and add more protocol functionality.
 
 ## macOS (Stenograph USB)
 
-PyUSB needs **libusb 1.0** on the system. The **`pyusb_libusb1_backend`** dependency
-does not ship a compiled libusb for typical installs, so on macOS you should
-install libusb yourself, for example:
+The plugin first uses **libusb 1.0** supplied by **`libusb-package`**. Published
+macOS wheels provide the library for Intel and Apple Silicon without a separate
+Homebrew installation. Unlike the previous `pyusb_libusb1_backend` extension,
+these wheels are not tied to a particular CPython minor version.
+
+Install the plugin with the same architecture that runs Plover. The dependency's
+macOS wheels each contain one architecture; switching between native Apple
+Silicon and Rosetta execution in the same plugin directory can require
+force-reinstalling `libusb-package` for the new architecture; see the commands
+below. An ordinary install or upgrade can keep the wrong-architecture library
+because pip considers the installed package version already satisfied.
+
+If the packaged library is missing or cannot load, the plugin logs the failure
+and tries system libusb. A source installation of `libusb-package` can succeed
+without building its native library, so a successful pip install alone does not
+prove that USB support is available. As a fallback, install libusb yourself:
 
 ```bash
 brew install libusb
@@ -38,7 +51,67 @@ PY="/Applications/Plover.app/Contents/Frameworks/Python.framework/Versions/Curre
 See [opensteno/plover#1841](https://github.com/opensteno/plover/issues/1841) for
 background on **`No backend available`** on macOS.
 
+### Switching between Apple Silicon and Rosetta
+
+Quit Plover before replacing the library. Set the plugin location and use the
+Python inside your Plover application (adjust the application path if needed):
+
+```bash
+export PYTHONUSERBASE="$HOME/Library/Application Support/plover/plugins/mac"
+PY="/Applications/Plover.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3"
+```
+
+Choose **one** command matching how you will run Plover. The architecture of your
+terminal is not necessarily the architecture of Plover.
+
+For native Apple Silicon Plover:
+
+```bash
+arch -arm64 "$PY" -m pip install --user --force-reinstall --no-cache-dir --only-binary=:all: 'libusb-package>=1.0.30.0'
+```
+
+For Intel Plover, or Apple Silicon Plover running with **Open using Rosetta**:
+
+```bash
+arch -x86_64 "$PY" -m pip install --user --force-reinstall --no-cache-dir --only-binary=:all: 'libusb-package>=1.0.30.0'
+```
+
+Restart Plover in the chosen architecture. These commands replace the library
+and its Python dependencies in Plover's user plugin directory; they do not
+modify the application bundle. `--only-binary=:all:` requires a published wheel
+instead of accepting a source build that might omit libusb. Switching back to
+the other architecture requires running the corresponding command again.
+
+## Testing
+
+Use an isolated environment; these tests do not need Plover or a writer:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --only-binary=:all: -r tests/requirements.txt
+python -m build --no-isolation
+python -m pip install --no-deps --force-reinstall dist/*.whl
+python -m unittest discover -s tests -v
+```
+
+On macOS, also run `python tests/smoke_macos_backend.py` in a fresh process. This
+loads the packaged libusb through the real resolver while forbidding system
+library discovery. It checks the actual loaded image path and never opens a
+writer. CI runs both checks against the installed wheel, outside the checkout,
+on Intel and Apple Silicon macOS, plus unit tests on Linux and Windows.
+
+Before releasing, also validate an installed plugin inside the signed Plover
+application launched through Finder on a machine without system libusb. Check
+both architectures and an upgrade from the old backend. With a writer, check
+connection before a realtime file is open, writing, unplug/reconnect, and starting
+a new writer job. The interpreter smoke test does not establish signed-app
+loading or hardware correctness.
+
 ## Releasing
+
+Update `version` in `setup.cfg` and commit it before tagging a release. The
+release script does not update the package version.
 
 Cut a release with `scripts/release.sh <version>`, e.g.:
 
