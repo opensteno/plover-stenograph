@@ -1,3 +1,5 @@
+import sys
+
 from usb import core, util
 
 from stenograph.libusb_backend import resolve_pyusb_backend
@@ -30,14 +32,21 @@ class LibusbTransport(MachineTransport):
             self.disconnect()
 
         if self._backend is None:
-            raise MissingUsbBackendError(
+            message = (
                 "No USB backend (libusb-1.0) available. "
-                "Check the log for loading errors. On macOS, force-reinstall "
-                "libusb-package for Plover's architecture using the instructions at "
-                "https://github.com/opensteno/plover-stenograph"
-                "#switching-between-apple-silicon-and-rosetta "
-                "or install system libusb as a fallback (brew install libusb)."
+                "Check the log for loading errors. "
             )
+            if sys.platform.startswith("darwin"):
+                message += (
+                    "Force-reinstall libusb-package for Plover's architecture "
+                    "using the instructions at "
+                    "https://github.com/opensteno/plover-stenograph"
+                    "#switching-between-apple-silicon-and-rosetta "
+                    "or install system libusb as a fallback (brew install libusb)."
+                )
+            else:
+                message += "Install libusb 1.0 using your system's package manager."
+            raise MissingUsbBackendError(message)
 
         # Find the device by the vendor ID.
         usb_device = core.find(backend=self._backend, idVendor=VENDOR_ID)

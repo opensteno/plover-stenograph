@@ -136,8 +136,12 @@ class BackendSelectionTests(unittest.TestCase):
 
     def test_linux_legacy_failure_uses_system_backend(self):
         self.legacy.get_pyusb_backend.side_effect = ImportError("legacy extension unavailable")
-        with patch.object(sys, "platform", "linux"):
+        with patch.object(sys, "platform", "linux"), self.assertLogs(
+            "plover", level="WARNING"
+        ) as logs:
             self.assertIs(libusb_backend.resolve_pyusb_backend(), self.get_backend.return_value)
+        self.assertIn("Legacy packaged libusb is unavailable; trying system libusb", logs.output[0])
+        self.assertIn("legacy extension unavailable", logs.output[0])
         self.package.get_library_path.assert_not_called()
         self.get_backend.assert_called_once_with()
 
@@ -165,13 +169,22 @@ class ConnectionDiagnosisTests(unittest.TestCase):
     def test_missing_backend_does_not_attempt_device_discovery(self):
         with patch("stenograph.transport_libusb.resolve_pyusb_backend", return_value=None):
             transport = LibusbTransport()
-        with patch("stenograph.transport_libusb.core.find") as find:
-            with self.assertRaisesRegex(
-                MissingUsbBackendError,
-                "force-reinstall.*#switching-between-apple-silicon-and-rosetta",
-            ):
-                transport.connect()
-        find.assert_not_called()
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform), patch.object(sys, "platform", platform), patch(
+                "stenograph.transport_libusb.core.find"
+            ) as find:
+                with self.assertRaises(MissingUsbBackendError) as caught:
+                    transport.connect()
+                message = str(caught.exception)
+                self.assertIn("Check the log for loading errors", message)
+                if platform == "darwin":
+                    self.assertIn("Force-reinstall libusb-package", message)
+                    self.assertIn("#switching-between-apple-silicon-and-rosetta", message)
+                else:
+                    self.assertIn("system's package manager", message)
+                    for macos_term in ("libusb-package", "brew", "Rosetta", "apple-silicon"):
+                        self.assertNotIn(macos_term, message)
+                find.assert_not_called()
 
     def test_working_backend_without_writer_is_a_different_error(self):
         backend = object()

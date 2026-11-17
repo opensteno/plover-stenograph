@@ -103,7 +103,7 @@ def resolve_pyusb_backend():
             if backend is not None:
                 return backend
         except Exception:
-            _logger.debug("Legacy packaged libusb is unavailable", exc_info=True)
+            _logger.warning("Legacy packaged libusb is unavailable; trying system libusb", exc_info=True)
 
     backend = libusb1.get_backend()
     if backend is not None:
