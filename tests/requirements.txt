@@ -1,0 +1,7 @@
+build
+setuptools
+wheel
+packaging
+pyusb>=1.0.0
+more_itertools>=6.0.0
+libusb-package>=1.0.30.0 ; platform_system == "Darwin"
