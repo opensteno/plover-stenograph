@@ -1,8 +1,7 @@
 from enum import IntEnum
+from secrets import randbelow
 from struct import Struct, calcsize, pack, unpack
-from more_itertools import grouper
-from itertools import compress
-
+from stenograph.exception import ProtocolViolationException
 from stenograph.stroke import Stroke
 
 MAX_READ = 0x200  # Arbitrary read limit
@@ -40,7 +39,9 @@ class StenoPacket:
     _STRUCT = Struct(_STRUCT_FORMAT)
 
 
-    sequence_number = 0
+    # Zero is unsolicited status. Start elsewhere on each process launch so
+    # a late reply left by a previous process is unlikely to match our Open.
+    sequence_number = randbelow(0xffffffff) + 1
 
     def __init__(self, sequence_number=None, packet_type=0, data_length=None,
                  p1=0, p2=0, p3=0, p4=0, p5=0, data=b''):
@@ -98,11 +99,33 @@ class StenoPacket:
 
     @staticmethod
     def _increment_sequence_number():
-        StenoPacket.sequence_number = (StenoPacket.sequence_number + 1) % 0xFFFFFFFF
+        StenoPacket.sequence_number = (StenoPacket.sequence_number + 1) & 0xFFFFFFFF or 1
+
+    @staticmethod
+    def response_size(header):
+        """Validate a response header before trusting its declared length."""
+        if len(header) < StenoPacket.HEADER_SIZE:
+            raise ProtocolViolationException("Truncated writer header")
+        sync, seq, kind, length, *params = StenoPacket._STRUCT.unpack(
+            header[:StenoPacket.HEADER_SIZE]
+        )
+        if sync != StenoPacket._SYNC:
+            raise ProtocolViolationException("Invalid writer packet sync")
+        try:
+            PacketType(kind)
+        except ValueError:
+            raise ProtocolViolationException("Unknown writer packet type: %s" % kind)
+        if length > MAX_READ:
+            raise ProtocolViolationException("Invalid writer payload length: %s" % length)
+        return StenoPacket.HEADER_SIZE + length
 
     @staticmethod
     def unpack(usb_packet):
         """Create a USBPacket from raw data"""
+        usb_packet = bytes(usb_packet)
+        size = StenoPacket.response_size(usb_packet)
+        if len(usb_packet) < size:
+            raise ProtocolViolationException("Truncated writer payload")
         packet = StenoPacket(
             # Drop sync when unpacking.
             *StenoPacket._STRUCT.unpack(usb_packet[:StenoPacket.HEADER_SIZE])[1:]
@@ -136,10 +159,6 @@ class StenoPacket:
     def is_error(self):
         return self.packet_type == PacketType.ERROR
 
-    @property
-    def is_ok(self):
-        return self.packet_type == PacketType.OK
-
     def strokes(self):
         """Get list of strokes represented in this packet's data"""
 
@@ -148,7 +167,4 @@ class StenoPacket:
         # Steno should only be present on ACTION_READ packets
         assert self.packet_type == PacketType.READ_FILE
 
-        return [
-            Stroke.unpack(stroke_data)
-            for stroke_data in grouper(self.data, 8, fillvalue=0)
-        ]
+        return Stroke.decode_records(self.data)[0]

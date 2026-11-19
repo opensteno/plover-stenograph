@@ -8,24 +8,27 @@ class MissingUsbBackendError(Exception):
     pass
 
 
-class ProtocolViolationException(Exception):
+class ProtocolViolationException(ConnectionError):
     """The writer did something unexpected"""
     pass
 
 
-class UnableToPerformRequestException(Exception):
+class UnableToPerformRequestException(ConnectionError):
     """The writer cannot perform the action requested"""
     pass
 
 
-class FileNotAvailableException(Exception):
+class FileNotAvailableException(ConnectionError):
     """The writer cannot read from the current file"""
     pass
 
 
 class NoRealtimeFileException(Exception):
     """The realtime file doesn't exist, likely because the user hasn't started writing"""
-    pass
+    def __init__(self, confirmed_open=False):
+        super().__init__("Writer has no realtime file")
+        # Only a correlated Open reply can establish that the next file is new.
+        self.confirmed_open = confirmed_open
 
 
 class FinishedReadingClosedFileException(Exception):
