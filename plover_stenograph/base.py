@@ -2,7 +2,7 @@ from plover import log
 from plover.machine.base import ThreadedStenotypeBase
 
 from stenograph import *
-from time import sleep
+from stenograph.stroke import Stroke
 
 
 class StenographMachine(ThreadedStenotypeBase):
@@ -19,6 +19,7 @@ class StenographMachine(ThreadedStenotypeBase):
     def __init__(self, transport, params):
         super().__init__()
         self._transport = transport
+        self._waiting_for_writer = False
 
     def _on_stroke(self, keys):
         steno_keys = self.keymap.keys_to_actions(keys)
@@ -29,7 +30,7 @@ class StenographMachine(ThreadedStenotypeBase):
         self.finished.clear()
         self._initializing()
         try:
-            self._transport.connect()
+            self._waiting_for_writer = self._transport.connect() is False
         except MissingUsbBackendError as e:
             log.error("%s", e)
             self._error()
@@ -43,7 +44,6 @@ class StenographMachine(ThreadedStenotypeBase):
             log.error("Error connecting to Stenograph writer: %s" % e)
             self._error()
         else:
-            # self._ready()
             self.start()
 
     def _reconnect(self):
@@ -51,7 +51,8 @@ class StenographMachine(ThreadedStenotypeBase):
         while not self.finished.wait(0.25):
             try:
                 self._initializing()
-                self._transport.connect()
+                if self._transport.connect() is False:
+                    continue
             except Exception as e:
                 log.debug("Stenograph writer exception: %s" % e)
                 self._error()
@@ -66,62 +67,106 @@ class StenographMachine(ThreadedStenotypeBase):
         return response
 
     def run(self):
-
         class ReadState:
             def __init__(self):
-                self.realtime = False  # Not realtime until we get a 0-length response
-                self.realtime_file_open = False  # We are reading from a file
-                self.offset = 0  # File offset to read from
-
-            def reset(self):
-                self.__init__()
+                self.realtime = False
+                self.realtime_file_open = False
+                self.waiting_for_file = False
+                self.new_file_expected = False
+                self.offset = 0
+                self.pending_stroke = b''
+                self.bad_record_warning = False
 
         state = ReadState()
-
-        # Tracks whether the machine *just* disconnected, or has been disconnected
-        # for a while, to prevent showing the warning more times than needed.
         disconnected = False
-
-        while not self.finished.isSet():
-            try:
-                if not state.realtime_file_open:
-                    # Open realtime file
-                    self._send_receive(StenoPacket.make_open_request())
-                    state.realtime_file_open = True
-                response = self._send_receive(
-                    StenoPacket.make_read_request(file_offset=state.offset)
-                )
-            except ConnectionError as e:
-                if not disconnected:
-                    log.warning("Stenograph writer disconnected, attempting to reconnect")
-                    disconnected = True
-                log.debug("Stenograph writer exception: %s", e)
-                # User could start a new file while disconnected.
-                state.reset()
+        ready = False
+        try:
+            if self._waiting_for_writer:
+                log.info("Waiting for Stenograph writer")
                 self._reconnect()
-            except NoRealtimeFileException:
-                # User hasn"t started writing, just keep opening the realtime file
-                state.reset()
-            except FinishedReadingClosedFileException:
-                # File closed! Open the realtime file.
-                state.reset()
-            else:
-                if disconnected:
-                    log.warning("Stenograph writer reconnected")
-                    self._ready()
+            while not self.finished.is_set():
+                try:
+                    if not state.realtime_file_open:
+                        self._send_receive(StenoPacket.make_open_request())
+                        if self.finished.is_set():
+                            break
+                        state.realtime_file_open = True
+                        # A file created after an observed no-file interval is
+                        # new writing, including its first nonempty batch.
+                        state.realtime = state.new_file_expected
+                        if state.realtime and not ready:
+                            self._ready()
+                            ready = True
+                    if self.finished.is_set():
+                        break
+                    response = self._send_receive(
+                        StenoPacket.make_read_request(file_offset=state.offset)
+                    )
+                except NoRealtimeFileException as error:
+                    if self.finished.is_set():
+                        break
+                    if not state.waiting_for_file:
+                        log.debug("Stenograph writer has no realtime file; waiting for a job")
+                    if not ready:
+                        self._ready()  # An idle writer that answered is connected.
+                        ready = True
+                    state = ReadState()
+                    state.waiting_for_file = True
+                    state.new_file_expected = error.confirmed_open
+                    if disconnected:
+                        log.info("Stenograph writer reconnected")
                     disconnected = False
-                if response.data_length:
-                    state.offset += response.data_length
-                elif not state.realtime:
-                    self._ready()
-                    state.realtime = True
-                if response.data_length and state.realtime:
-                    for stroke in response.strokes():
-                        self._on_stroke(stroke.keys)
-                if state.realtime:
-                    sleep(0.10)
-
-        self._transport.disconnect()
+                    self.finished.wait(0.10)
+                except FinishedReadingClosedFileException:
+                    if self.finished.is_set():
+                        break
+                    state = ReadState()
+                    self.finished.wait(0.10)
+                except ConnectionError as error:
+                    if self.finished.is_set():
+                        break
+                    if not disconnected:
+                        log.warning("Stenograph writer disconnected, attempting to reconnect: %s", error)
+                        disconnected = True
+                    log.debug("Stenograph writer exception: %s", error)
+                    # No-file evidence is scoped to this connection. After a
+                    # reconnect, discard existing history until caught up.
+                    state = ReadState()
+                    ready = False
+                    self._transport.disconnect()
+                    self._reconnect()
+                else:
+                    if self.finished.is_set():
+                        break
+                    if disconnected:
+                        log.info("Stenograph writer reconnected")
+                        disconnected = False
+                    if response.data_length:
+                        state.offset += response.data_length
+                        data = state.pending_stroke + response.data
+                        complete = len(data) - len(data) % 8
+                        state.pending_stroke = data[complete:]
+                        if state.realtime:
+                            strokes, skipped = Stroke.decode_records(data[:complete])
+                            if skipped and not state.bad_record_warning:
+                                log.warning(
+                                    "Skipping malformed Stenograph stroke records; "
+                                    "further warnings suppressed for this file"
+                                )
+                                state.bad_record_warning = True
+                            for stroke in strokes:
+                                if self.finished.is_set():
+                                    break
+                                self._on_stroke(stroke.keys)
+                    else:
+                        state.realtime = True
+                        if not ready:
+                            self._ready()
+                            ready = True
+                    if state.realtime:
+                        self.finished.wait(0.10)
+        finally:
+            self._transport.disconnect()
 
     def stop_capture(self):
         super().stop_capture()
