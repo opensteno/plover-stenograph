@@ -19,6 +19,7 @@ class StenographMachine(ThreadedStenotypeBase):
     def __init__(self, transport, params):
         super().__init__()
         self._transport = transport
+        self._waiting_for_writer = False
 
     def _on_stroke(self, keys):
         steno_keys = self.keymap.keys_to_actions(keys)
@@ -29,7 +30,7 @@ class StenographMachine(ThreadedStenotypeBase):
         self.finished.clear()
         self._initializing()
         try:
-            self._transport.connect()
+            self._waiting_for_writer = self._transport.connect() is False
         except MissingUsbBackendError as e:
             log.error("%s", e)
             self._error()
@@ -43,7 +44,6 @@ class StenographMachine(ThreadedStenotypeBase):
             log.error("Error connecting to Stenograph writer: %s" % e)
             self._error()
         else:
-            # self._ready()
             self.start()
 
     def _reconnect(self):
@@ -51,7 +51,8 @@ class StenographMachine(ThreadedStenotypeBase):
         while not self.finished.wait(0.25):
             try:
                 self._initializing()
-                self._transport.connect()
+                if self._transport.connect() is False:
+                    continue
             except Exception as e:
                 log.debug("Stenograph writer exception: %s" % e)
                 self._error()
@@ -80,6 +81,9 @@ class StenographMachine(ThreadedStenotypeBase):
         disconnected = False
         ready = False
         try:
+            if self._waiting_for_writer:
+                log.info("Waiting for Stenograph writer")
+                self._reconnect()
             while not self.finished.is_set():
                 try:
                     if not state.realtime_file_open:
@@ -110,7 +114,7 @@ class StenographMachine(ThreadedStenotypeBase):
                     state.waiting_for_file = True
                     state.new_file_expected = error.confirmed_open
                     if disconnected:
-                        log.warning("Stenograph writer reconnected")
+                        log.info("Stenograph writer reconnected")
                     disconnected = False
                     self.finished.wait(0.10)
                 except FinishedReadingClosedFileException:
@@ -135,7 +139,7 @@ class StenographMachine(ThreadedStenotypeBase):
                     if self.finished.is_set():
                         break
                     if disconnected:
-                        log.warning("Stenograph writer reconnected")
+                        log.info("Stenograph writer reconnected")
                         disconnected = False
                     if response.data_length:
                         state.offset += response.data_length

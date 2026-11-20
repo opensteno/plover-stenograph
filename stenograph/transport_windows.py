@@ -4,7 +4,7 @@ import uuid
 
 from stenograph.transport import MachineTransport
 from stenograph.packet import MAX_READ, StenoPacket
-from stenograph.exception import ProtocolViolationException, ConnectionError, ConnectionError
+from stenograph.exception import ConnectionError
 
 GUID = wintypes.BYTE * 16
 HDEVINFO = wintypes.HANDLE
@@ -38,7 +38,7 @@ PSP_DEVICE_INTERFACE_DETAIL_DATA_A = ctypes.POINTER(SP_DEVICE_INTERFACE_DETAIL_D
 SetupDiGetClassDevs = windll.setupapi.SetupDiGetClassDevsA
 SetupDiGetClassDevs.argtypes = [
     ctypes.POINTER(GUID), # ClassGuid
-    wintypes.LPCWSTR,     # Enumerator
+    wintypes.LPCSTR,      # Enumerator
     wintypes.HWND,        # hwndParent
     wintypes.DWORD,       # Flags
 ]
@@ -109,8 +109,7 @@ CloseHandle.argtypes = [
 ]
 CloseHandle.restype = wintypes.BOOL
 
-CREATE_ALWAYS = 2
-CREATE_NEW    = 1
+OPEN_EXISTING = 3
 
 DIGCF_DEVICEINTERFACE = 0x00000010
 DIGCF_PRESENT         = 0x00000002
@@ -126,7 +125,7 @@ FILE_SHARE_WRITE = 0x00000002
 GENERIC_READ  = 0x80000000
 GENERIC_WRITE = 0x40000000
 
-INVALID_HANDLE_VALUE = -1
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
 class WindowsUsbTransport(MachineTransport):
@@ -134,10 +133,11 @@ class WindowsUsbTransport(MachineTransport):
     def __init__(self):
         super().__init__()
         self._usb_device = INVALID_HANDLE_VALUE
+        self._winusb = None
         self._read_buffer = ctypes.create_string_buffer(MAX_READ + StenoPacket.HEADER_SIZE)
 
     @staticmethod
-    def _open_device_instance(device_info, guid):
+    def _open_device_instance(device_info, guid, flags=FILE_ATTRIBUTE_NORMAL):
         dev_interface_data = SP_DEVICE_INTERFACE_DATA()
         dev_interface_data.cbSize = ctypes.sizeof(SP_DEVICE_INTERFACE_DATA)
 
@@ -163,7 +163,8 @@ class WindowsUsbTransport(MachineTransport):
 
         dev_detail_data_buffer = ctypes.create_string_buffer(request_length.value)
         dev_detail_data_ptr = ctypes.cast(dev_detail_data_buffer, PSP_DEVICE_INTERFACE_DETAIL_DATA_A)
-        dev_detail_data_ptr[0].cbSize = ctypes.sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A)
+        # Windows requires 8 on x64 and 5 on x86 for the ANSI structure.
+        dev_detail_data_ptr[0].cbSize = 8 if ctypes.sizeof(ctypes.c_void_p) == 8 else 5
 
         # Now put the actual detail data into the buffer
         if not SetupDiGetDeviceInterfaceDetail(
@@ -182,23 +183,23 @@ class WindowsUsbTransport(MachineTransport):
                             GENERIC_READ | GENERIC_WRITE,
                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                             None,
-                            CREATE_ALWAYS | CREATE_NEW,
-                            FILE_ATTRIBUTE_NORMAL,
+                            OPEN_EXISTING,
+                            flags,
                             None)
         if handle == INVALID_HANDLE_VALUE:
             raise ConnectionError('CreateFile: %s' % ctypes.WinError())
         return handle
 
     @staticmethod
-    def _open_device_by_class_interface_and_instance(class_guid):
+    def _open_device_by_class_interface_and_instance(class_guid, flags=FILE_ATTRIBUTE_NORMAL):
         device_info = SetupDiGetClassDevs(ctypes.byref(class_guid), None, None,
                                           DIGCF_DEVICEINTERFACE | DIGCF_PRESENT)
         if device_info == INVALID_HANDLE_VALUE:
             raise ConnectionError('SetupDiGetClassDevs: %s' % ctypes.WinError())
-        usb_device = WindowsUsbTransport._open_device_instance(device_info, class_guid)
-        if not SetupDiDestroyDeviceInfoList(device_info):
-            raise ConnectionError('SetupDiDestroyDeviceInfoList: %s' % ctypes.WinError())
-        return usb_device
+        try:
+            return WindowsUsbTransport._open_device_instance(device_info, class_guid, flags)
+        finally:
+            SetupDiDestroyDeviceInfoList(device_info)
 
     def _usb_write_packet(self, request):
         bytes_written = wintypes.DWORD(0)
@@ -226,6 +227,9 @@ class WindowsUsbTransport(MachineTransport):
         return writer_packet
 
     def disconnect(self):
+        if self._winusb is not None:
+            transport, self._winusb = self._winusb, None
+            transport.disconnect()
         handle = self._usb_device
         self._usb_device = INVALID_HANDLE_VALUE
         if handle != INVALID_HANDLE_VALUE and not CloseHandle(handle):
@@ -233,12 +237,18 @@ class WindowsUsbTransport(MachineTransport):
 
     def connect(self):
         # If already connected, disconnect first.
-        if self._usb_device != INVALID_HANDLE_VALUE:
-            self.disconnect()
+        self.disconnect()
+        from stenograph.transport_winusb import WinUsbTransport
+        modern = WinUsbTransport()
+        if modern.connect():
+            self._winusb = modern
+            return True
         self._usb_device = self._open_device_by_class_interface_and_instance(USB_WRITER_GUID)
         return self._usb_device != INVALID_HANDLE_VALUE
 
     def send_receive(self, request):
+        if self._winusb is not None:
+            return self._winusb.send_receive(request)
         if self._usb_device == INVALID_HANDLE_VALUE:
             raise ConnectionError("USB device is not open")
         written = self._usb_write_packet(request)
