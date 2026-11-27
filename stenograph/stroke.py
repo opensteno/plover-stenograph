@@ -15,6 +15,21 @@ class Stroke:
         return "Stroke([{0}])".format(", ".join(self.keys))
 
     @staticmethod
+    def decode_records(data):
+        """Decode complete 8-byte records; a bad record must not restart a job."""
+        if len(data) % 8:
+            raise ValueError("Incomplete stroke record")
+        strokes = []
+        skipped = 0
+        for offset in range(0, len(data), 8):
+            record = data[offset:offset + 8]
+            if any(byte < 0xc0 for byte in record[:4]):
+                skipped += 1
+                continue
+            strokes.append(Stroke.unpack(record))
+        return strokes, skipped
+
+    @staticmethod
     def unpack(stroke_data):
         keys = []
         for steno_byte, key_chart_row in zip(stroke_data, STENO_KEY_CHART):
