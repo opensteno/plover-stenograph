@@ -18,10 +18,10 @@ def read_response(request, read, pending, packet_size, timeout=3.0):
     rounded to whole USB packets. A large speculative read can wait for a ZLP
     that the writer never sends, even after the complete response has arrived.
     """
-    deadline = monotonic() + timeout
+    started = monotonic()
     skipped = 0
     while True:
-        remaining = deadline - monotonic()
+        remaining = timeout - (monotonic() - started)
         if remaining < 0.001:
             raise ConnectionError("Timed out awaiting writer response")
         if len(pending) >= StenoPacket.HEADER_SIZE:

@@ -48,6 +48,31 @@ CI also tests the installed wheel outside the checkout. Before release, check
 an idle writer, first strokes in a new job, closing/reopening jobs, stopping
 capture, and unplug/reconnect with actual hardware.
 
+## Windows (Stenograph USB)
+
+The **Stenograph USB** machine supports both Stenograph's WinUSB driver
+(`StenographWinUsb`, driver package version 1.0.0.2) and its older
+`wdfsgusbV3` driver. No additional USB library is required on Windows.
+The plugin checks the WinUSB interface first and uses the legacy interface
+when no WinUSB writer is present. Errors opening a present WinUSB writer
+are reported rather than hidden by a legacy fallback. Close other CAT
+applications before connecting to the writer.
+
+WinUSB reads and writes use three-second transfer timeouts. Responses can
+span transfers, and stale responses are discarded within a bounded exchange.
+The interface handle is released before the Windows device handle on shutdown
+and failed initialization. Existing job/history behavior is shared with the
+other transports.
+
+WinUSB compatibility is covered by native Windows tests with simulated API
+responses. On November 19, 2026, a Luminex II connected through the existing
+WinUSB driver in Plover's bundled Python 3.9.7. With output disabled, the user
+confirmed first-stroke delivery in a new job and subsequent live strokes in
+Paper Tape. USB unplug/replug followed by Plover's Reconnect also delivered
+new strokes without replaying the existing job's history. The November 15 hardware results
+used the legacy driver with the earlier reading fixes; the legacy path has
+automated coverage in this revision but has not been retested on hardware.
+
 ## macOS (Stenograph USB)
 
 The plugin first uses **libusb 1.0** supplied by **`libusb-package`**. Published
